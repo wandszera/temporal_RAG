@@ -1,4 +1,4 @@
-"""Servidor FastAPI e UI Interativa para Temporal RAG."""
+"""Servidor FastAPI e UI Interativa para Temporal RAG com orquestração LangGraph."""
 
 from datetime import datetime
 from typing import Optional
@@ -53,6 +53,23 @@ def get_customer_events(customer_id: str):
     return events
 
 
+@app.get("/api/agent/graph")
+def get_agent_graph():
+    """Retorna o diagrama Mermaid e detalhes dos nós do agente LangGraph."""
+    return {
+        "mermaid": temporal_agent.get_graph_mermaid(),
+        "nodes": [
+            {"id": "parse_and_classify", "title": "1. Parse & Classify", "desc": "Extrai cliente, datas e intenção temporal da pergunta."},
+            {"id": "check_temporal_bounds", "title": "2. Temporal Bounds", "desc": "Valida se a data consultada antecede a criação da conta (aciona abstenção prévia)."},
+            {"id": "sql_aggregator", "title": "3. SQL Aggregator Tool", "desc": "Executa contagens analíticas em janelas fechadas (faturas/tickets)."},
+            {"id": "temporal_retriever", "title": "4. Temporal Retriever", "desc": "Aplica filtros bitemporais (valid_from <= T < valid_to e recorded_at <= T)."},
+            {"id": "check_sufficiency", "title": "5. Sufficiency & Reflection Loop", "desc": "Verifica suficiência de evidências e aciona re-retrieval se necessário."},
+            {"id": "synthesize_answer", "title": "6. Synthesize Answer", "desc": "Gera a resposta final estritamente fundamentada com citações dos IDs de eventos."},
+            {"id": "abstain", "title": "7. Abstain Node", "desc": "Emite resposta formal de abstenção (ABSTAIN) quando faltam fatos válidos."},
+        ]
+    }
+
+
 @app.post("/api/query")
 def execute_query(req: QueryRequest):
     as_of_dt = None
@@ -93,9 +110,13 @@ def index():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Temporal RAG para CRM - Dashboard MVP</title>
+    <title>Temporal RAG para CRM - Dashboard com LangGraph</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+        mermaid.initialize({ startOnLoad: false, theme: 'dark' });
+    </script>
     <style>
         body { background-color: #0f172a; color: #e2e8f0; font-family: system-ui, -apple-system, sans-serif; }
         .card { background-color: #1e293b; border-color: #334155; color: #e2e8f0; }
@@ -111,18 +132,20 @@ def index():
         .comparison-naive { border-color: #ef4444; background: rgba(239, 68, 68, 0.08); }
         .comparison-temporal { border-color: #10b981; background: rgba(16, 185, 129, 0.08); }
         .code-pill { background: #334155; padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 0.85em; }
+        .trace-step { padding: 4px 8px; border-radius: 4px; margin-bottom: 4px; font-family: monospace; font-size: 0.82em; background: rgba(56, 189, 248, 0.1); border-left: 3px solid #38bdf8; }
     </style>
 </head>
 <body class="p-4">
     <div class="container-fluid">
         <header class="d-flex justify-content-between align-items-center mb-4 pb-3 border-bottom border-secondary">
             <div>
-                <h2 class="fw-bold text-info"><i class="bi bi-clock-history me-2"></i>Temporal RAG para CRM</h2>
-                <p class="text-secondary mb-0">Arquitetura Bitemporal (valid_time vs recorded_time) & Benchmark de Avaliação</p>
+                <h2 class="fw-bold text-info mb-1"><i class="bi bi-diagram-3-fill me-2"></i>Temporal RAG com LangGraph</h2>
+                <p class="text-secondary mb-0">Raciocínio Bitemporal, Agente com Grafo de Estados e Benchmark de Avaliação</p>
             </div>
-            <div>
-                <button class="btn btn-outline-info me-2" onclick="loadBenchmark()"><i class="bi bi-speedometer2 me-1"></i>Rodar Benchmark</button>
-                <span class="badge bg-primary fs-6">MVP Ativo</span>
+            <div class="d-flex align-items-center gap-2">
+                <button class="btn btn-outline-warning" onclick="showGraphModal()"><i class="bi bi-bezier2 me-1"></i>Ver Grafo LangGraph</button>
+                <button class="btn btn-outline-info" onclick="loadBenchmark()"><i class="bi bi-speedometer2 me-1"></i>Rodar Benchmark</button>
+                <span class="badge bg-success fs-6"><i class="bi bi-check2-circle me-1"></i>LangGraph Ativo</span>
             </div>
         </header>
 
@@ -144,7 +167,7 @@ def index():
                     <div class="mb-3">
                         <label class="form-label">Data de Corte ("As-Of" Date):</label>
                         <input type="date" id="asOfInput" class="form-control" value="2024-03-15">
-                        <small class="text-secondary">Simula como o sistema responderia se a pergunta fosse feita nesta data.</small>
+                        <small class="text-secondary">Simula a resposta histórica exata nesta data.</small>
                     </div>
 
                     <div class="mb-3">
@@ -154,11 +177,11 @@ def index():
                             <button class="btn btn-sm btn-outline-secondary" onclick="setQuery('Qual era o meu plano contratado?')">Qual era o plano?</button>
                             <button class="btn btn-sm btn-outline-secondary" onclick="setQuery('Em qual data mudei de plano?')">Quando mudei?</button>
                             <button class="btn btn-sm btn-outline-secondary" onclick="setQuery('Qual era o endereço da minha sede?')">Endereço na data</button>
-                            <button class="btn btn-sm btn-outline-secondary" onclick="setQuery('Quantas faturas foram emitidas nos últimos 90 dias?')">Contar faturas</button>
+                            <button class="btn btn-sm btn-outline-secondary" onclick="setQuery('Quantas faturas foram emitidas entre 01/01/2023 e 31/12/2023?')">Contar faturas</button>
                         </div>
                     </div>
 
-                    <button class="btn btn-primary w-100 py-2 fw-semibold" onclick="submitQuery()"><i class="bi bi-play-fill me-1"></i>Executar Comparação (Naive vs Temporal)</button>
+                    <button class="btn btn-primary w-100 py-2 fw-semibold" onclick="submitQuery()"><i class="bi bi-play-fill me-1"></i>Executar no Grafo LangGraph</button>
                 </div>
 
                 <!-- Comparação Lado a Lado -->
@@ -175,15 +198,22 @@ def index():
                         <small class="text-secondary">Fontes citadas: <span id="naiveSources" class="code-pill">-</span></small>
                     </div>
 
-                    <!-- Temporal RAG -->
+                    <!-- Temporal RAG com LangGraph -->
                     <div class="comparison-box comparison-temporal">
                         <div class="d-flex justify-content-between align-items-center mb-1">
-                            <span class="text-success fw-bold"><i class="bi bi-check-circle me-1"></i>Temporal RAG (MVP)</span>
-                            <span class="badge bg-success" id="tempConfidence">100%</span>
+                            <span class="text-success fw-bold"><i class="bi bi-cpu me-1"></i>Temporal RAG (LangGraph)</span>
+                            <div>
+                                <span class="badge bg-primary me-1">StateGraph</span>
+                                <span class="badge bg-success" id="tempConfidence">100%</span>
+                            </div>
                         </div>
                         <p id="tempAnswer" class="mb-2 fw-semibold text-white">-</p>
-                        <small class="text-secondary">Fontes citadas: <span id="tempSources" class="code-pill">-</span></small>
-                        <div id="tempTrace" class="mt-2 text-info" style="font-size: 0.8em;"></div>
+                        <div class="mb-2"><small class="text-secondary">Fontes citadas: <span id="tempSources" class="code-pill">-</span></small></div>
+                        
+                        <div class="mt-2">
+                            <span class="small fw-semibold text-info mb-1 d-block"><i class="bi bi-activity me-1"></i>Trilha de Execução dos Nós:</span>
+                            <div id="tempTrace" style="max-height: 180px; overflow-y: auto;"></div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -192,7 +222,7 @@ def index():
             <div class="col-lg-7">
                 <div class="card p-3">
                     <div class="d-flex justify-content-between align-items-center mb-3">
-                        <h5 class="card-title text-info mb-0"><i class="bi bi-diagram-3 me-2"></i>Linha do Tempo Bitemporal do Cliente</h5>
+                        <h5 class="card-title text-info mb-0"><i class="bi bi-clock-history me-2"></i>Linha do Tempo Bitemporal do Cliente</h5>
                         <div class="d-flex gap-2" style="font-size: 0.8em;">
                             <span><span class="timeline-badge badge-plan"></span>Plano</span>
                             <span><span class="timeline-badge badge-invoice"></span>Fatura</span>
@@ -203,6 +233,27 @@ def index():
                     <div id="timelineContainer" style="max-height: 700px; overflow-y: auto;">
                         <p class="text-secondary">Selecione um cliente para carregar seus eventos...</p>
                     </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal do Grafo LangGraph -->
+    <div class="modal fade" id="graphModal" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content bg-dark text-white border-secondary">
+                <div class="modal-header border-secondary">
+                    <h5 class="modal-title"><i class="bi bi-bezier2 me-2"></i>Grafo de Estados do Agente (LangGraph)</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-secondary small mb-3">
+                        O grafo abaixo orquestra o ciclo de raciocínio com nós determinísticos, roteamento para SQL Tool, verificação de fronteiras temporais e loop de reflexão.
+                    </p>
+                    <div id="mermaidGraphContainer" class="p-3 bg-black rounded border border-secondary text-center mb-3">
+                        <div class="spinner-border text-info" role="status"></div>
+                    </div>
+                    <div id="nodesDescription" class="row g-2"></div>
                 </div>
             </div>
         </div>
@@ -336,11 +387,36 @@ def index():
                     document.getElementById('tempAnswer').innerText = data.temporal.answer;
                     document.getElementById('tempSources').innerText = (data.temporal.cited_event_ids || []).join(', ') || 'nenhum';
                     document.getElementById('tempConfidence').innerText = Math.round(data.temporal.confidence * 100) + '%';
-                    const traceHtml = (data.temporal.reasoning_trace || []).map(t => `<div>• ${t}</div>`).join('');
+                    const traceHtml = (data.temporal.reasoning_trace || []).map(t => `<div class="trace-step">${t}</div>`).join('');
                     document.getElementById('tempTrace').innerHTML = traceHtml;
                 }
             } catch (err) {
                 alert('Erro ao executar consulta: ' + err);
+            }
+        }
+
+        async function showGraphModal() {
+            const modal = new bootstrap.Modal(document.getElementById('graphModal'));
+            modal.show();
+            try {
+                const res = await fetch('/api/agent/graph');
+                const data = await res.json();
+                
+                const container = document.getElementById('mermaidGraphContainer');
+                container.innerHTML = `<div class="mermaid">${data.mermaid}</div>`;
+                await mermaid.run({ nodes: container.querySelectorAll('.mermaid') });
+
+                const nodesDesc = document.getElementById('nodesDescription');
+                nodesDesc.innerHTML = data.nodes.map(n => `
+                    <div class="col-md-6">
+                        <div class="card p-2 bg-dark border-secondary h-100">
+                            <span class="text-info fw-bold small">${n.title}</span>
+                            <span class="text-secondary small">${n.desc}</span>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (err) {
+                console.error("Erro ao carregar grafo LangGraph:", err);
             }
         }
 
@@ -367,7 +443,7 @@ def index():
                                 <tr class="text-info">
                                     <th>Métrica</th>
                                     <th>Naive RAG (Baseline)</th>
-                                    <th>Temporal RAG (MVP)</th>
+                                    <th>Temporal RAG (LangGraph)</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -396,7 +472,7 @@ def index():
                     </div>
                     <div class="alert alert-info mt-3 small mb-0">
                         <i class="bi bi-info-circle me-1"></i>
-                        O Temporal RAG supera o Naive RAG ao filtrar fatos invalidados temporalmente e prevenir vazamento de dados futuros.
+                        O Temporal RAG com LangGraph supera o Naive RAG ao filtrar fatos invalidados temporalmente e orquestrar reflexão com rastreamento estrito de eventos.
                     </div>
                 `;
             } catch (err) {

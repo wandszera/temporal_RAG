@@ -85,8 +85,14 @@ class BaselineAgent:
         )
 
 
-class TemporalAgent:
-    """Agente Temporal: resolve bitemporalidade, detecta janelas temporais, agrega e abstém se necessário."""
+from temporal_rag.agent.langgraph_agent import LangGraphTemporalAgent
+
+# TemporalAgent é acionado através do grafo compilado do LangGraph
+TemporalAgent = LangGraphTemporalAgent
+
+
+class LegacyRuleBasedTemporalAgent:
+    """Implementação direta baseada em regras (mantida para benchmark e ablação)."""
 
     def __init__(self, db: Database):
         self.db = db
