@@ -2,6 +2,10 @@
 
 > **Projeto de aprendizado.** Foi construído para estudar como sistemas de recuperação e geração (RAG) lidam com perguntas que dependem do tempo ("qual era o plano deste cliente em março de 2023?"). Não é um produto, não foi validado em produção, **usa apenas dados sintéticos** e **não chama nenhum LLM**. Os números abaixo vêm de um benchmark criado por mim mesmo e devem ser lidos com as ressalvas da seção "Como ler os resultados".
 
+## Visão geral
+
+Os diagramas (componentes usados e não usados, e o grafo do agente nó a nó) estão em [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md) e renderizam direto no GitHub.
+
 ## O problema
 
 Em um CRM, os fatos mudam: o cliente troca de plano, de endereço, de contato. Um RAG comum busca por similaridade de texto e tende a devolver o fato mais parecido ou mais recente, não o fato que era verdadeiro na data perguntada. Isso gera três erros típicos:

@@ -2,6 +2,39 @@
 
 > Projeto de aprendizado com dados sintéticos e sem LLM. Este documento descreve o que o código faz hoje; o que ficou de fora está em [`APRENDIZADOS_E_LIMITACOES.md`](APRENDIZADOS_E_LIMITACOES.md).
 
+## Visão geral dos componentes
+
+O que o projeto usa (azul e verde) e o que **não** usa (tracejado). A cor do agente indica que ele é determinístico: não há LLM.
+
+```mermaid
+flowchart LR
+    subgraph DADOS["Dados"]
+        G["Gerador sintético<br/>250 clientes, seed 42"] --> DB[("SQLite<br/>eventos bitemporais")]
+        G --> B["Benchmark<br/>320 perguntas + 1.920 paráfrases"]
+    end
+    subgraph AGENTE["Agente (LangGraph, sem LLM)"]
+        EX["Extrator<br/>regras ou LLM plugável"] --> GU["Guarda<br/>injeção e PII"]
+        GU --> RE["Recuperador<br/>filtro bitemporal, multi-hop"]
+        RE --> RS["Resposta<br/>template com citações"]
+    end
+    subgraph AVAL["Avaliação"]
+        M["Métricas estritas<br/>modo cego, split dev/test"]
+        A["Ablação<br/>TF-IDF, BM25, LSA, RRF, embeddings"]
+    end
+    DB --> RE
+    B --> M
+    RS --> M
+    DB --> A
+    B --> A
+    N1["LLM real"]:::off
+    N2["pgvector"]:::off
+    N3["Reranker"]:::off
+    N4["Embeddings no agente"]:::off
+    classDef off stroke-dasharray: 5 5,fill:#f5f5f5,color:#555
+```
+
+Embeddings neurais (MiniLM) foram medidos só na ablação; o agente não os usa. Detalhes em [`AVALIACAO.md`](AVALIACAO.md).
+
 ## 1. Modelo bitemporal
 
 Cada evento da linha do tempo de um cliente (`TimelineEvent`, em `models/schema.py`) carrega duas dimensões de tempo:
@@ -49,6 +82,24 @@ graph TD;
 	sql_aggregator --> synthesize_answer;
 	synthesize_answer --> __end__([__end__]);
 	abstain --> __end__;
+```
+
+Versão anotada, com as condições de cada rota:
+
+```mermaid
+flowchart TD
+    S([início]) --> P["parse_and_classify<br/>extrator, intenção, datas"]
+    P --> C{"check_temporal_bounds<br/>guarda, limites, rota"}
+    C -- "inseguro, cliente ou data inválidos" --> AB["abstain<br/>recusa sem inventar"]
+    C -- "agregação" --> SQL["sql_aggregator<br/>filtro Python nos eventos"]
+    C -- "demais categorias" --> R["temporal_retriever<br/>bitemporal, multi-hop"]
+    R --> SU{"check_sufficiency<br/>evidência basta?"}
+    SU -- "retry, no máximo 1x" --> R
+    SU -- "insuficiente" --> AB
+    SU -- "suficiente" --> SY["synthesize_answer<br/>template com citações"]
+    SQL --> SY
+    SY --> E([fim])
+    AB --> E
 ```
 
 | Nó | O que faz | Observação honesta |
