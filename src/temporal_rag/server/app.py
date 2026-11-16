@@ -1,8 +1,12 @@
 """Servidor FastAPI e UI Interativa para Temporal RAG com orquestração LangGraph."""
 
 from datetime import datetime
+import os
+import secrets
+from collections import defaultdict
+from time import perf_counter
 from typing import Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -11,8 +15,27 @@ from temporal_rag.agent.agent import BaselineAgent, TemporalAgent
 from temporal_rag.benchmark.dataset_generator import BenchmarkDatasetGenerator
 from temporal_rag.eval.evaluator import BenchmarkEvaluator
 from temporal_rag.storage.db import Database
+from temporal_rag.security import public_response, query_is_safe
 
 app = FastAPI(title="Temporal RAG para CRM", version="0.1.0")
+
+_latencies = defaultdict(list)
+
+
+@app.middleware("http")
+async def api_controls(request: Request, call_next):
+    start = perf_counter()
+    key = os.getenv("TEMPORAL_RAG_API_KEY")
+    if key and request.url.path.startswith("/api/"):
+        supplied = request.headers.get("x-api-key", "")
+        if not secrets.compare_digest(supplied, key):
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "Não autorizado"}, status_code=401)
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        _latencies[request.url.path].append((perf_counter() - start) * 1000)
+        _latencies[request.url.path] = _latencies[request.url.path][-1000:]
+    return response
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,6 +95,10 @@ def get_agent_graph():
 
 @app.post("/api/query")
 def execute_query(req: QueryRequest):
+    if not query_is_safe(req.query, req.customer_id):
+        raise HTTPException(status_code=400, detail="Consulta bloqueada: instrução adversarial ou outro cliente")
+    if req.mode not in ("temporal", "naive", "both"):
+        raise HTTPException(status_code=422, detail="Modo inválido")
     as_of_dt = None
     if req.as_of:
         try:
@@ -83,13 +110,28 @@ def execute_query(req: QueryRequest):
 
     if req.mode in ("temporal", "both"):
         temp_resp = temporal_agent.answer(req.query, customer_id=req.customer_id, as_of=as_of_dt)
-        response_data["temporal"] = temp_resp.model_dump(mode="json")
+        response_data["temporal"] = public_response(temp_resp)
 
     if req.mode in ("naive", "both"):
         naive_resp = baseline_agent.answer(req.query, customer_id=req.customer_id, as_of=as_of_dt)
-        response_data["naive"] = naive_resp.model_dump(mode="json")
+        response_data["naive"] = public_response(naive_resp)
 
     return response_data
+
+
+@app.get("/api/metrics")
+def get_metrics():
+    """Latência em memória por rota; sem perguntas ou dados pessoais."""
+    result = {}
+    for route, values in _latencies.items():
+        ordered = sorted(values)
+        if ordered:
+            result[route] = {
+                "count": len(ordered),
+                "p50_ms": round(ordered[int((len(ordered) - 1) * 0.50)], 2),
+                "p95_ms": round(ordered[int((len(ordered) - 1) * 0.95)], 2),
+            }
+    return result
 
 
 @app.post("/api/benchmark/run")
