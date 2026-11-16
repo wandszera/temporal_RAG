@@ -66,6 +66,8 @@ class BenchmarkCategory(str, Enum):
     AGGREGATION = "aggregation"              # "Quantas faturas foram pagas em Q1?"
     UNANSWERABLE = "unanswerable"            # Perguntas fora do período ou sem dados
     CONTRADICTION = "contradiction"          # Fatos conflitantes ao longo do tempo
+    MULTI_HOP = "multi_hop"                  # Combina dois eventos: "plano quando abriu o ticket X?"
+    ADVERSARIAL = "adversarial"              # Outro cliente / prompt injection: esperado bloquear
 
 
 class BenchmarkSample(BaseModel):
@@ -77,6 +79,7 @@ class BenchmarkSample(BaseModel):
     expected_answer: str
     expected_event_ids: List[str]
     description: Optional[str] = None
+    split: str = "dev"  # "dev" ou "test" (atribuído por cliente, determinístico)
 
 
 class RetrievalResult(BaseModel):

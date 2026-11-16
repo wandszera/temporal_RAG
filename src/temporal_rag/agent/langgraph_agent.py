@@ -15,6 +15,7 @@ from typing import Annotated, Any, Dict, List, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 
+from temporal_rag.agent.intent import IntentExtractor, RuleBasedExtractor
 from temporal_rag.agent.temporal_parser import TemporalIntentParser
 from temporal_rag.models.schema import (
     AgentResponse,
@@ -23,6 +24,7 @@ from temporal_rag.models.schema import (
     TimelineEvent,
 )
 from temporal_rag.retrieval.temporal_retriever import TemporalRetriever
+from temporal_rag.security import query_is_safe
 from temporal_rag.storage.db import Database
 
 
@@ -42,13 +44,17 @@ class AgentState(TypedDict):
     cited_event_ids: List[str]
     reasoning_trace: Annotated[List[str], operator.add]
     abstained: bool
+    unsafe: bool
+    plan: Optional[str]
+    ticket_id: Optional[str]
 
 
 class LangGraphTemporalAgent:
     """Orquestrador do raciocínio temporal baseado em LangGraph."""
 
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, extractor: Optional[IntentExtractor] = None):
         self.db = db
+        self.extractor = extractor or RuleBasedExtractor()
         self.retriever = TemporalRetriever(db)
         self.graph = self._build_graph()
 
@@ -106,8 +112,9 @@ class LangGraphTemporalAgent:
     def _node_parse_and_classify(self, state: AgentState) -> Dict[str, Any]:
         query = state["query"]
         cid = state.get("customer_id") or TemporalIntentParser.extract_customer_id(query)
-        dates = TemporalIntentParser.extract_dates(query)
-        cat = state.get("category") or TemporalIntentParser.classify_intent(query)
+        intent = self.extractor.extract(query)
+        dates = intent.dates
+        cat = state.get("category") or intent.category
         ref_date = state.get("as_of") or (dates[0] if dates else datetime.now())
 
         trace = [
@@ -121,11 +128,24 @@ class LangGraphTemporalAgent:
             "as_of": ref_date,
             "reasoning_trace": trace,
             "retry_count": state.get("retry_count", 0),
+            "unsafe": intent.unsafe,
+            "plan": intent.plan,
+            "ticket_id": intent.ticket_id,
         }
 
     def _node_check_temporal_bounds(self, state: AgentState) -> Dict[str, Any]:
         cid = state["customer_id"]
         ref_date = state["as_of"] or datetime.now()
+
+        # Guarda de segurança: override de instruções ou referência a outro cliente
+        if state.get("unsafe") or not query_is_safe(state["query"], cid):
+            return {
+                "route": "abstain",
+                "abstained": True,
+                "answer": "ABSTAIN: Pedido bloqueado pela política de segurança (instrução de override ou outro cliente).",
+                "confidence": 1.0,
+                "reasoning_trace": ["[LangGraph::Guard] Pergunta bloqueada antes de qualquer recuperação."],
+            }
 
         if not cid:
             return {
@@ -223,12 +243,12 @@ class LangGraphTemporalAgent:
         found_events: List[TimelineEvent] = []
         trace = []
 
-        if category == BenchmarkCategory.CHANGE_DETECTION:
-            target_plan = None
-            for p in ["Free", "Starter", "Pro", "Enterprise"]:
-                if p.lower() in query.lower():
-                    target_plan = p
-                    break
+        if category == BenchmarkCategory.MULTI_HOP:
+            found_events = self._multi_hop_events(all_events, query, state.get("plan"), state.get("ticket_id"))
+            trace.append(f"[LangGraph::Retrieve] Multi-hop encadeou {len(found_events)} evento(s).")
+
+        elif category == BenchmarkCategory.CHANGE_DETECTION:
+            target_plan = state.get("plan")
             matching = [
                 e for e in all_events
                 if e.event_type == EventType.PLAN_CHANGE and (
@@ -243,7 +263,7 @@ class LangGraphTemporalAgent:
             cutoff = dates[0] if dates else ref_date
             subsequent = [
                 e for e in all_events
-                if e.valid_from > cutoff and e.event_type == EventType.TICKET and "aberto" in e.metadata.get("status", "")
+                if e.valid_from.date() > cutoff.date() and e.event_type == EventType.TICKET and "aberto" in e.metadata.get("status", "")
             ]
             subsequent.sort(key=lambda e: e.valid_from)
             found_events = subsequent[:1] if subsequent else []
@@ -283,6 +303,38 @@ class LangGraphTemporalAgent:
             "cited_event_ids": [e.id for e in found_events],
             "reasoning_trace": trace,
         }
+
+    @staticmethod
+    def _multi_hop_events(
+        all_events: List[TimelineEvent], query: str, plan: Optional[str] = None, ticket: Optional[str] = None
+    ) -> List[TimelineEvent]:
+        """Passo 1 acha o evento citado na pergunta; passo 2 usa a data dele para achar o segundo evento.
+
+        Retorna [] se qualquer salto falhar (o grafo então reflete e, se preciso, se abstém)."""
+        plans = sorted([e for e in all_events if e.event_type == EventType.PLAN_CHANGE], key=lambda e: e.valid_from)
+        ticket_id = ticket or TemporalIntentParser.extract_ticket_id(query)
+        if ticket_id:
+            ticket = next(
+                (e for e in all_events if e.event_type == EventType.TICKET
+                 and e.metadata.get("ticket_id") == ticket_id and e.metadata.get("status") == "aberto"),
+                None,
+            )
+            if ticket is None:
+                return []
+            active = [p for p in plans if p.is_valid_as_of(ticket.valid_from) and p.was_recorded_by(ticket.valid_from + timedelta(days=1))]
+            return [ticket, active[-1]] if active else []
+
+        target_plan = plan or next((p for p in ["Free", "Starter", "Pro", "Enterprise"] if p.lower() in query.lower()), None)
+        # a primeira entrada de plano é o plano inicial, não uma "migração"
+        changes = [p for p in plans[1:] if target_plan and p.metadata.get("new_plan") == target_plan]
+        if not changes:
+            return []
+        change = changes[0]
+        invoices = sorted(
+            [e for e in all_events if e.event_type == EventType.INVOICE and e.valid_from > change.valid_from],
+            key=lambda e: e.valid_from,
+        )
+        return [change, invoices[0]] if invoices else []
 
     def _node_check_sufficiency(self, state: AgentState) -> Dict[str, Any]:
         events = state.get("events", [])
@@ -324,6 +376,22 @@ class LangGraphTemporalAgent:
         customer = self.db.get_customer(cid)
         query = state["query"]
         category = state.get("category")
+
+        if category == BenchmarkCategory.MULTI_HOP and len(events) == 2:
+            first, second = events
+            if first.event_type == EventType.TICKET:
+                plan = second.metadata.get("new_plan")
+                ans = (
+                    f"Quando o chamado {first.metadata.get('ticket_id')} foi aberto "
+                    f"({first.valid_from.strftime('%d/%m/%Y')}), o cliente estava no Plano {plan}."
+                )
+            else:
+                ans = (
+                    f"A primeira fatura após a migração para o plano {first.metadata.get('new_plan')} "
+                    f"({first.valid_from.strftime('%d/%m/%Y')}) foi de R$ {float(second.metadata.get('amount', 0)):.2f} "
+                    f"(emitida em {second.valid_from.strftime('%d/%m/%Y')})."
+                )
+            return {"answer": ans, "confidence": 0.95, "cited_event_ids": [first.id, second.id]}
 
         if category == BenchmarkCategory.CHANGE_DETECTION and events:
             evt = events[0]
@@ -400,6 +468,9 @@ class LangGraphTemporalAgent:
             "cited_event_ids": [],
             "reasoning_trace": [],
             "abstained": False,
+            "unsafe": False,
+            "plan": None,
+            "ticket_id": None,
         }
 
         final_state = self.graph.invoke(initial_state)

@@ -5,7 +5,8 @@ from pathlib import Path
 from pydantic import BaseModel
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
-DATA_DIR = BASE_DIR / "data"
+# TEMPORAL_RAG_DATA_DIR permite gerar dados/benchmark em outro diretório sem tocar em data/.
+DATA_DIR = Path(os.getenv("TEMPORAL_RAG_DATA_DIR", str(BASE_DIR / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 class Settings(BaseModel):
@@ -23,6 +24,9 @@ class Settings(BaseModel):
     # Benchmark config
     benchmark_file: Path = DATA_DIR / "benchmark_dataset.json"
     evaluation_report_file: Path = DATA_DIR / "evaluation_report.json"
+    ablation_report_file: Path = DATA_DIR / "ablation_report.json"
+    paraphrase_file: Path = DATA_DIR / "paraphrase_benchmark.json"
+    paraphrase_report_file: Path = DATA_DIR / "paraphrase_report.json"
     
     # Retrieval config
     default_top_k: int = 5

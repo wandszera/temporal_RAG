@@ -13,6 +13,7 @@ if hasattr(sys.stderr, "reconfigure"):
 
 from temporal_rag.agent.agent import BaselineAgent, TemporalAgent
 from temporal_rag.config import settings
+from temporal_rag.eval.metrics import strict_correct
 from temporal_rag.models.schema import BenchmarkCategory, BenchmarkSample
 from temporal_rag.storage.db import Database
 
@@ -20,14 +21,16 @@ from temporal_rag.storage.db import Database
 class BenchmarkEvaluator:
     """Executa a avaliação automatizada e gera as métricas comparativas."""
 
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, extractor=None):
         self.db = db
         self.baseline_agent = BaselineAgent(db)
-        self.temporal_agent = TemporalAgent(db)
+        self.temporal_agent = TemporalAgent(db, extractor=extractor)
 
     def evaluate_model(
-        self, agent_name: str, agent_instance, samples: List[BenchmarkSample]
+        self, agent_name: str, agent_instance, samples: List[BenchmarkSample], blind: bool = False
     ) -> Dict:
+        """Avalia um agente. Com blind=True, o agente NÃO recebe a categoria nem a data do gabarito
+        (precisa inferi-las da pergunta), como aconteceria em uso real."""
         category_stats = {}
         total_time_ms = 0.0
 
@@ -35,6 +38,7 @@ class BenchmarkEvaluator:
             category_stats[cat.value] = {
                 "total": 0,
                 "correct": 0,
+                "strict_correct": 0,
                 "citation_hits": 0,
                 "citation_total_expected": 0,
                 "citation_total_retrieved": 0,
@@ -48,8 +52,8 @@ class BenchmarkEvaluator:
             response = agent_instance.answer(
                 query=sample.question,
                 customer_id=sample.customer_id,
-                as_of=sample.as_of,
-                category=sample.category,
+                as_of=None if blind else sample.as_of,
+                category=None if blind else sample.category,
             )
             elapsed_ms = (time.perf_counter() - start_t) * 1000.0
             total_time_ms += elapsed_ms
@@ -73,6 +77,8 @@ class BenchmarkEvaluator:
 
             if is_correct:
                 category_stats[cat_key]["correct"] += 1
+            if strict_correct(sample, response):
+                category_stats[cat_key]["strict_correct"] += 1
 
             # 2. Métricas de Citação de Eventos
             expected_set = set(sample.expected_event_ids)
@@ -86,6 +92,9 @@ class BenchmarkEvaluator:
         total_samples = len(samples)
         total_correct = sum(cs["correct"] for cs in category_stats.values())
         overall_accuracy = (total_correct / total_samples) * 100.0 if total_samples > 0 else 0.0
+
+        total_strict = sum(cs["strict_correct"] for cs in category_stats.values())
+        strict_accuracy = (total_strict / total_samples) * 100.0 if total_samples > 0 else 0.0
 
         total_hits = sum(cs["citation_hits"] for cs in category_stats.values())
         total_exp = sum(cs["citation_total_expected"] for cs in category_stats.values())
@@ -101,30 +110,35 @@ class BenchmarkEvaluator:
                 breakdown[cat_name] = {
                     "count": cs["total"],
                     "accuracy": round((cs["correct"] / cs["total"]) * 100.0, 1),
+                    "strict_accuracy": round((cs["strict_correct"] / cs["total"]) * 100.0, 1),
                 }
 
         return {
             "model": agent_name,
             "total_questions": total_samples,
             "overall_accuracy": round(overall_accuracy, 1),
+            "strict_accuracy": round(strict_accuracy, 1),
+            "blind": blind,
             "citation_recall": round(citation_recall, 1),
             "citation_precision": round(citation_precision, 1),
             "avg_latency_ms": round(avg_latency, 2),
             "category_breakdown": breakdown,
         }
 
-    def run_benchmark(self, samples: List[BenchmarkSample]) -> Dict:
-        print(f"\n🚀 Iniciando Benchmark com {len(samples)} perguntas...")
+    def run_benchmark(self, samples: List[BenchmarkSample], blind: bool = False) -> Dict:
+        mode = "cego (sem categoria/data do gabarito)" if blind else "assistido (recebe categoria/data do gabarito)"
+        print(f"\n🚀 Iniciando Benchmark com {len(samples)} perguntas, modo {mode}...")
 
         print("-> Avaliando Baseline (Naive RAG)...")
-        naive_metrics = self.evaluate_model("Naive RAG (Baseline)", self.baseline_agent, samples)
+        naive_metrics = self.evaluate_model("Naive RAG (Baseline)", self.baseline_agent, samples, blind=blind)
 
         print("-> Avaliando Temporal RAG...")
-        temporal_metrics = self.evaluate_model("Temporal RAG", self.temporal_agent, samples)
+        temporal_metrics = self.evaluate_model("Temporal RAG", self.temporal_agent, samples, blind=blind)
 
         report = {
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "total_samples": len(samples),
+            "blind": blind,
             "results": {
                 "naive_rag": naive_metrics,
                 "temporal_rag": temporal_metrics,
@@ -139,7 +153,8 @@ class BenchmarkEvaluator:
 
     def print_summary_table(self, naive: Dict, temporal: Dict):
         summary_rows = [
-            ["Acurácia Geral (%)", f"{naive['overall_accuracy']}%", f"{temporal['overall_accuracy']}%"],
+            ["Acurácia Geral, checagem frouxa (%)", f"{naive['overall_accuracy']}%", f"{temporal['overall_accuracy']}%"],
+            ["Acurácia Geral, checagem estrita (%)", f"{naive['strict_accuracy']}%", f"{temporal['strict_accuracy']}%"],
             ["Recall de Citação de Fontes (%)", f"{naive['citation_recall']}%", f"{temporal['citation_recall']}%"],
             ["Precisão de Citação (%)", f"{naive['citation_precision']}%", f"{temporal['citation_precision']}%"],
             ["Latência Média (ms)", f"{naive['avg_latency_ms']} ms", f"{temporal['avg_latency_ms']} ms"],
@@ -156,10 +171,11 @@ class BenchmarkEvaluator:
         cat_rows = []
         all_cats = sorted(list(set(list(naive["category_breakdown"].keys()) + list(temporal["category_breakdown"].keys()))))
         for cat in all_cats:
-            naive_acc = naive["category_breakdown"].get(cat, {}).get("accuracy", 0.0)
-            temp_acc = temporal["category_breakdown"].get(cat, {}).get("accuracy", 0.0)
+            naive_acc = naive["category_breakdown"].get(cat, {}).get("strict_accuracy", 0.0)
+            temp_acc = temporal["category_breakdown"].get(cat, {}).get("strict_accuracy", 0.0)
             count = temporal["category_breakdown"].get(cat, {}).get("count", 0)
             cat_rows.append([cat, count, f"{naive_acc}%", f"{temp_acc}%"])
 
+        print("(checagem estrita)")
         print(tabulate(cat_rows, headers=["Categoria", "Amostras", "Naive RAG", "Temporal RAG"], tablefmt="github"))
         print("=" * 65 + "\n")
