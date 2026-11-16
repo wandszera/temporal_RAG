@@ -10,7 +10,8 @@ from tabulate import tabulate
 from temporal_rag.config import settings
 from temporal_rag.eval.metrics import average, ndcg_at_k, recall_at_k, reciprocal_rank
 from temporal_rag.models.schema import BenchmarkCategory, BenchmarkSample
-from temporal_rag.retrieval.strategies import DEFAULT_VARIANTS, RetrievalLab, Variant
+from temporal_rag.retrieval.embedders import Embedder
+from temporal_rag.retrieval.strategies import DEFAULT_VARIANTS, EMBEDDING_VARIANTS, RetrievalLab, Variant
 from temporal_rag.storage.db import Database
 
 # Categorias sem evento-fonte a recuperar (abstenção / bloqueio) não entram na ablação.
@@ -31,12 +32,15 @@ def run_ablation(
     variants: Sequence[Variant] = DEFAULT_VARIANTS,
     ks: Sequence[int] = (5, 10),
     save: bool = True,
+    embedder: Optional[Embedder] = None,
 ) -> Dict:
     chosen = select_samples(samples, split)
     customers = db.list_customers(limit=100000)
     events_by_customer = {c.id: db.get_all_events(c.id) for c in customers}
     corpus = [e for events in events_by_customer.values() for e in events]
-    lab = RetrievalLab(corpus)
+    lab = RetrievalLab(corpus, embedder=embedder)
+    if embedder is not None:
+        variants = tuple(variants) + EMBEDDING_VARIANTS
 
     rows = []
     per_category: Dict[str, Dict[str, float]] = {}
@@ -68,6 +72,7 @@ def run_ablation(
         "split": split,
         "n_samples": len(chosen),
         "seed": settings.seed,
+        "embedder": embedder.name if embedder else None,
         "ks": list(ks),
         "variants": rows,
         "mrr_by_category": per_category,

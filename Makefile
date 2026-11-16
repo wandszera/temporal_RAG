@@ -1,4 +1,4 @@
-.PHONY: help install seed eval eval-para ablate test run compare clean
+.PHONY: help install seed eval eval-para ablate ablate-emb test run compare clean
 
 help:
 	@echo "Comandos disponíveis:"
@@ -23,6 +23,9 @@ eval-para:
 
 ablate:
 	python -m temporal_rag.cli ablate
+
+ablate-emb:
+	python -m temporal_rag.cli ablate --embedder sentence-transformers
 
 test:
 	pytest -v tests/

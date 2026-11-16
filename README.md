@@ -101,7 +101,7 @@ temporal_RAG/
 ## Limitações principais
 
 - Sem LLM: as respostas são montadas por modelos de texto a partir dos eventos recuperados.
-- Sem embeddings neurais nem reranker: o "denso" da ablação é LSA (TF-IDF + SVD).
+- Embeddings neurais foram medidos só na ablação (MiniLM multilíngue, uma execução) e não superaram os métodos lexicais; o agente não os usa. Sem reranker. Detalhes em `docs/AVALIACAO.md`.
 - O pgvector está disponível na imagem do Docker, mas **não é usado** pelo código.
 - Agregações são filtros em Python sobre os eventos, não consultas SQL.
 - Sem autorização por cliente nem row-level security.

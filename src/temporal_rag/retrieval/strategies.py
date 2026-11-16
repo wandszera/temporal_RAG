@@ -15,6 +15,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from temporal_rag.agent.temporal_parser import TemporalIntentParser
 from temporal_rag.config import settings
 from temporal_rag.models.schema import BenchmarkCategory, TimelineEvent
+from temporal_rag.retrieval.embedders import Embedder
 
 TOKEN = re.compile(r"\w+", re.UNICODE)
 RRF_K = 60
@@ -32,7 +33,7 @@ def event_text(event: TimelineEvent) -> str:
 @dataclass(frozen=True)
 class Variant:
     name: str
-    scorer: str  # "tfidf" | "bm25" | "lsa" | "hybrid"
+    scorer: str  # "tfidf" | "bm25" | "lsa" | "hybrid" | "dense" | "hybrid_dense"
     temporal_filter: bool = False
     decay: bool = False
 
@@ -46,6 +47,15 @@ DEFAULT_VARIANTS: Tuple[Variant, ...] = (
     Variant("bm25 + filtro temporal", "bm25", temporal_filter=True),
     Variant("hybrid + filtro temporal", "hybrid", temporal_filter=True),
     Variant("hybrid + filtro + decaimento", "hybrid", temporal_filter=True, decay=True),
+)
+
+
+# Só entram na ablação quando um embedder é informado (--embedder).
+EMBEDDING_VARIANTS: Tuple[Variant, ...] = (
+    Variant("dense (embeddings)", "dense"),
+    Variant("hybrid (bm25+dense, RRF)", "hybrid_dense"),
+    Variant("dense + filtro temporal", "dense", temporal_filter=True),
+    Variant("hybrid (bm25+dense) + filtro temporal", "hybrid_dense", temporal_filter=True),
 )
 
 
@@ -119,7 +129,14 @@ def _rank_positions(values: np.ndarray) -> np.ndarray:
 class RetrievalLab:
     """Ajusta TF-IDF, LSA e BM25 no corpus inteiro e ordena eventos de um cliente por variante."""
 
-    def __init__(self, corpus_events: Sequence[TimelineEvent], lsa_components: int = 48, seed: int = 42):
+    def __init__(
+        self,
+        corpus_events: Sequence[TimelineEvent],
+        lsa_components: int = 48,
+        seed: int = 42,
+        embedder: Optional[Embedder] = None,
+    ):
+        self.embedder = embedder
         texts = [event_text(e) for e in corpus_events]
         self.tfidf = TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True, strip_accents="unicode", lowercase=True)
         matrix = self.tfidf.fit_transform(texts)
@@ -145,6 +162,14 @@ class RetrievalLab:
             bm = self._scores("bm25", query, events)
             ls = self._scores("lsa", query, events)
             return 1.0 / (RRF_K + _rank_positions(bm)) + 1.0 / (RRF_K + _rank_positions(ls))
+        if scorer in ("dense", "hybrid_dense"):
+            if self.embedder is None:
+                raise RuntimeError("scorer denso exige um embedder (use --embedder)")
+            dense = self.embedder.embed(texts) @ self.embedder.embed([query])[0]
+            if scorer == "dense":
+                return dense
+            bm = self._scores("bm25", query, events)
+            return 1.0 / (RRF_K + _rank_positions(bm)) + 1.0 / (RRF_K + _rank_positions(dense))
         raise ValueError(f"scorer desconhecido: {scorer}")
 
     def rank(self, variant: Variant, events: List[TimelineEvent], query: str) -> List[str]:

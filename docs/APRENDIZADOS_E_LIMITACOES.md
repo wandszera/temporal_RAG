@@ -42,7 +42,7 @@ Legenda: feito, parcial, não feito.
 | 3 | Chunking por evento | Feito (um evento por documento) |
 | 3 | Resumos hierárquicos, janelas de sessão | Não feito |
 | 3 | Embeddings no pgvector, `tsvector` | Não feito |
-| 3 | Baseline vetorial puro e busca híbrida com RRF | Feito, com LSA no lugar de embeddings neurais |
+| 3 | Baseline vetorial puro e busca híbrida com RRF | Feito com LSA; embeddings neurais medidos à parte na ablação (não superaram os lexicais) |
 | 3 | Filtro de janela temporal, decaimento por recência | Feito (decaimento sem efeito nos dados) |
 | 3 | Reranker | Não feito |
 | 3 | recall@k, MRR, nDCG e tabela de ablação | Feito |
@@ -71,7 +71,7 @@ Legenda: feito, parcial, não feito.
 - O conjunto de teste nunca foi usado; os 75% em redações novas ainda podem estar levemente otimistas.
 
 **Sistema**
-- Sem LLM, sem embeddings neurais, sem reranker.
+- Sem LLM e sem reranker; embeddings neurais só na ablação, fora do agente.
 - Extrator de intenção por regras é frágil a redações novas; categorias `aggregation`, `change_detection` e `contradiction` ficaram em 50% na verificação.
 - Agregações são filtros em Python, não SQL.
 - Caminho PostgreSQL e uso do pgvector não testados.
@@ -84,7 +84,7 @@ Legenda: feito, parcial, não feito.
 
 1. Escrever à mão (ou com revisão humana) um conjunto de perguntas de linguagem livre e avaliá-lo **uma vez** no split `test`.
 2. Rodar o extrator de LLM (`--extractor llm`) com uma função de completar texto, medir custo e latência e comparar com as regras na verificação.
-3. Substituir o LSA por embeddings neurais e testar um reranker na ablação.
+3. Testar um reranker e outros modelos de embedding na ablação (o MiniLM não superou os lexicais).
 4. Usar PostgreSQL com pgvector e `tsvector` de verdade e comparar com a versão em memória.
 5. Medir injeção dentro dos dados (e-mails adversariais) quando houver um LLM gerando a resposta.
 6. Adicionar CI, intervalos de confiança e uma análise de erros mais detalhada por categoria.

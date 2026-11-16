@@ -113,7 +113,12 @@ def cmd_ablate(args):
         sys.exit(1)
     if args.split in ("test", "all"):
         print("⚠️  Split de teste: use só na avaliação final, depois de congelar as decisões no split dev.")
-    report = run_ablation(db, samples, split=args.split)
+    embedder = None
+    if args.embedder:
+        from temporal_rag.retrieval.embedders import build_embedder
+
+        embedder = build_embedder(args.embedder)
+    report = run_ablation(db, samples, split=args.split, embedder=embedder)
     print_ablation(report)
     print(f"\n💾 Relatório salvo em: {settings.ablation_report_file}")
 
@@ -223,6 +228,11 @@ def main():
     # Ablate
     p_ablate = subparsers.add_parser("ablate", help="Ablação de recuperação (recall@k, MRR, nDCG)")
     p_ablate.add_argument("--split", choices=["dev", "test", "all"], default="dev", help="Conjunto avaliado (padrão: dev)")
+    p_ablate.add_argument(
+        "--embedder",
+        default=None,
+        help="Ativa variantes densas: 'sentence-transformers[:modelo]' ou 'pacote.modulo:funcao' (padrão: desligado)",
+    )
     p_ablate.set_defaults(func=cmd_ablate)
 
     # Compare

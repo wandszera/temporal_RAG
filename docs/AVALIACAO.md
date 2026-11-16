@@ -74,7 +74,7 @@ Observações:
 - O filtro temporal, derivado só do texto da pergunta, é o maior ganho: recall@5 passa de 0,50–0,60 para 0,81–0,88.
 - O híbrido tem o melhor MRR e nDCG@5, mas **não** o melhor recall@5; não há vencedor único.
 - O decaimento por recência não mudou nada nestes dados.
-- "Denso" aqui é LSA (TF-IDF + SVD), não embedding neural. Reranker não foi testado.
+- "Denso" na tabela principal é LSA (TF-IDF + SVD); embeddings neurais estão na seção abaixo. Reranker não foi testado.
 - Em `as_of_state` o MRR com filtro é 0,5: o filtro deixa poucos eventos, e não investiguei por que o evento certo não fica em primeiro.
 
 ## 6. Histórico de correções (por que o 100% antigo não vale)
@@ -107,3 +107,25 @@ python -m pytest -q tests/                      # 40 testes
 ```
 
 Os relatórios em JSON ficam em `data/` (`evaluation_report.json`, `ablation_report.json`, `paraphrase_report.json`). Para não sobrescrever uma pasta `data/` existente, defina `TEMPORAL_RAG_DATA_DIR`.
+
+## Embeddings neurais (medidos)
+
+Modelo: `paraphrase-multilingual-MiniLM-L12-v2` (sentence-transformers), split dev, N=159, seed 42, executado na máquina do autor. Comando: `python -m temporal_rag.cli ablate --embedder sentence-transformers` (`make ablate-emb`). Sem `--embedder`, nada é baixado.
+
+| variante | recall@5 | recall@10 | MRR | nDCG@5 |
+|---|---|---|---|---|
+| lsa | 0.502 | 0.805 | 0.562 | 0.469 |
+| dense (embeddings) | 0.290 | 0.497 | 0.279 | 0.215 |
+| hybrid bm25+lsa (RRF) | 0.536 | 0.796 | 0.475 | 0.425 |
+| hybrid bm25+dense (RRF) | 0.502 | 0.688 | 0.405 | 0.366 |
+| tfidf + filtro temporal | 0.881 | 0.987 | 0.531 | 0.607 |
+| hybrid bm25+lsa + filtro | 0.812 | 0.947 | 0.604 | 0.630 |
+| dense + filtro temporal | 0.594 | 0.723 | 0.448 | 0.450 |
+| hybrid bm25+dense + filtro | 0.752 | 0.887 | 0.516 | 0.543 |
+
+Leitura:
+- Neste corpus sintético, os embeddings neurais **não** superaram os métodos lexicais: o `dense` puro ficou abaixo de TF-IDF, BM25 e LSA, e o híbrido com embeddings ficou abaixo do híbrido com LSA.
+- O ganho grande continua vindo do filtro temporal (recall@5 de 0,29 para 0,59 no `dense`, e de 0,60 para 0,88 no TF-IDF), não do tipo de representação.
+- Hipóteses, não testadas: os eventos são textos curtos e muito parecidos entre si, e as perguntas dependem de datas e números, que o modelo codifica mal. Não verifiquei essas causas.
+- `ms_per_query` do `dense` (≈119 ms) inclui a codificação dos textos na primeira passada; os demais usam cache.
+- Uma única execução, um único modelo, sem intervalo de confiança; o split `test` não foi usado. Os testes em `tests/test_embedders.py` usam um embedder de hashing e não medem qualidade.
