@@ -1,172 +1,109 @@
 # Temporal RAG para CRM
 
-Sistema de Recuperação e Geração Aumentada por Recuperação (**RAG**) com **Modelagem Bitemporal** e **Harness de Avaliação e Benchmark**.
+> **Projeto de aprendizado.** Foi construído para estudar como sistemas de recuperação e geração (RAG) lidam com perguntas que dependem do tempo ("qual era o plano deste cliente em março de 2023?"). Não é um produto, não foi validado em produção, **usa apenas dados sintéticos** e **não chama nenhum LLM**. Os números abaixo vêm de um benchmark criado por mim mesmo e devem ser lidos com as ressalvas da seção "Como ler os resultados".
 
----
+## O problema
 
-## 📌 Por que o RAG Tradicional Falha em Consultas Temporais?
+Em um CRM, os fatos mudam: o cliente troca de plano, de endereço, de contato. Um RAG comum busca por similaridade de texto e tende a devolver o fato mais parecido ou mais recente, não o fato que era verdadeiro na data perguntada. Isso gera três erros típicos:
 
-Em CRMs e sistemas empresariais, fatos mudam ao longo do tempo:
-- Clientes mudam de plano (*Free* $\to$ *Starter* $\to$ *Pro* $\to$ *Downgrade*).
-- Endereços e responsáveis corporativos são alterados.
-- Chamados são abertos, resolvidos e reabertos.
+1. **Inversão temporal:** responde com o plano atual quando a pergunta era sobre o passado.
+2. **Vazamento do futuro:** usa informação que o sistema só registrou depois da data perguntada.
+3. **Falta de abstenção:** inventa uma resposta para uma data em que o cliente nem existia.
 
-Quando um usuário pergunta:
-> *"Qual era o plano do cliente X em 15 de março de 2023?"*
+## O que o projeto explora
 
-O **Naive RAG** (busca vetorial tradicional por similaridade semântica) comete erros graves:
-1. **Inversão Temporal / Recency Bias:** Recupera o plano mais recente (*Pro* ou *Enterprise* de 2024) ou o chunk com maior densidade da palavra "plano", gerando alucinações históricas.
-2. **Data Leakage (Vazamento do Futuro):** Utiliza informações que o sistema só veio a conhecer meses depois.
-3. **Impossibilidade de Abstenção:** Quando consultado sobre um período anterior à existência do cliente, inventa respostas em vez de declarar ausência de dados (*ABSTAIN*).
+- **Modelo bitemporal:** cada evento tem o tempo em que o fato foi verdadeiro no mundo (`valid_from`/`valid_to`) e o tempo em que o CRM o registrou (`recorded_at`).
+- **Gerador sintético** reprodutível de clientes e linhas do tempo (seed fixa).
+- **Agente em LangGraph** com nós explícitos: classificar a pergunta, checar limites temporais e segurança, rotear, recuperar, refletir sobre a suficiência da evidência e responder citando eventos.
+- **Avaliação cuidadosa:** checagem estrita de respostas, modo "cego", divisão dev/teste por cliente, perguntas parafraseadas e ablação de recuperação (recall@k, MRR, nDCG).
+- **Extrator de intenção plugável** (regras ou LLM), com validação da saída e fallback. Nenhum LLM foi executado neste projeto.
 
----
+## Resultados em resumo
 
-## 🏗️ Arquitetura Bitemporal
+Tudo abaixo vem de `seed 42`, 250 clientes, 6.428 eventos, split `dev`. O split `test` **não foi usado**.
 
-Cada evento na linha do tempo do cliente possui duas dimensões temporais fundamentais:
+| O que foi medido | Naive RAG | Temporal RAG |
+| :--- | :---: | :---: |
+| Perguntas do benchmark (254), acurácia estrita | 3,1% | 100% |
+| Perguntas **parafraseadas usadas no ajuste** (1.016) | 5,3% | 100% |
+| Perguntas **parafraseadas de verificação** (508) | 11,0% | **75,0%** |
 
-```
-                  ┌─────────────────────────────────────────────────────────┐
-                  │                 DIMENSÕES BITEMPORAIS                  │
-                  └─────────────────────────────────────────────────────────┘
+**O número que importa é o 75%:** o 100% mede o quanto o agente cobre os modelos de pergunta que o próprio gerador cria, e as regras do agente foram escritas olhando esses modelos. Detalhes, ablação de recuperação e limitações estão em [`docs/AVALIACAO.md`](docs/AVALIACAO.md).
 
-  [valid_from, valid_to) ────────► Tempo no Mundo Real (Quando o fato foi verdadeiro)
-  [recorded_at]           ────────► Tempo no Sistema CRM (Quando o CRM registrou o fato)
-```
+## Como ler os resultados
 
-1. **`valid_time` (`valid_from` e `valid_to`):**
-   - Intervalo em que o fato estava de fato ativo na realidade do cliente.
-2. **`recorded_at`:**
-   - Timestamp no qual o sistema registrou o evento (garante que não haja vazamento de dados do futuro).
+- Dados sintéticos e benchmark vêm da mesma pessoa e do mesmo gerador: o sistema nunca enfrentou dados reais nem perguntas escritas por terceiros.
+- Há 31 a 32 perguntas por categoria, então um erro vale cerca de 3 pontos percentuais.
+- A versão inicial deste README reportava 100% com uma checagem frouxa e dando ao agente a resposta da categoria; isso foi corrigido (ver [`docs/AVALIACAO.md`](docs/AVALIACAO.md), seção "Histórico de correções").
+- Latências são de uma máquina de desenvolvimento e servem só para comparação entre variantes.
 
----
+## Início rápido
 
-## 📊 Resultados do Benchmark Comparativo
-
-Abaixo está o resultado da avaliação automatizada executada em **240 perguntas de teste com ground truth verificado**:
-
-| Métrica | Naive RAG (Baseline) | Temporal RAG (MVP) | Delta |
-| :--- | :---: | :---: | :---: |
-| **Acurácia Geral (%)** | **16.7%** | **100.0%** | **+83.3%** |
-| **Recall de Citação de Fontes (%)** | 48.8% | **99.6%** | **+50.8%** |
-| **Precisão de Citação (%)** | 16.2% | **85.4%** | **+69.2%** |
-| **Latência Média por Consulta** | 5.28 ms | **1.33 ms** | **4x mais rápido** |
-
-### Desempenho por Categoria Temporal
-
-| Categoria | Amostras | Naive RAG | Temporal RAG | Descrição do Caso de Teste |
-| :--- | :---: | :---: | :---: | :--- |
-| `aggregation` | 40 | 0.0% | **100.0%** | Contagem exata de faturas em janela fechada |
-| `as_of_state` | 40 | 100.0% | **100.0%** | Identificação do estado ativo em data retroativa |
-| `change_detection` | 40 | 0.0% | **100.0%** | Detecção da data exata em que ocorreu migração |
-| `contradiction` | 40 | 0.0% | **100.0%** | Resolução de endereços/contatos antes vs depois da alteração |
-| `temporal_ordering`| 40 | 0.0% | **100.0%** | Identificação cronológica do primeiro evento pós-corte |
-| `unanswerable` | 40 | 0.0% | **100.0%** | Abstenção correta (*ABSTAIN*) antes da criação da conta |
-
----
-
-## 🚀 Como Executar o Projeto
-
-### Pré-requisitos
-- Python 3.10+
-- (Opcional) Docker & Docker Compose para rodar PostgreSQL com `pgvector`
-
-### Instalação
+Testado com Python 3.10 em Linux (scikit-learn 1.7, numpy 2.2, pydantic 2.14, SQLAlchemy 2.0, FastAPI 0.162, LangGraph 1.2.22). O banco padrão é SQLite, sem Docker.
 
 ```bash
-# Clone ou acesse o repositório
-cd temporal_RAG
+python -m venv .venv
+source .venv/bin/activate            # PowerShell: .venv\Scripts\Activate.ps1
+pip install -r requirements.txt pytest httpx
+export PYTHONPATH=src                # PowerShell: $env:PYTHONPATH = "src"
 
-# Instale o pacote em modo editável
-pip install -e .
+python -m temporal_rag.cli seed      # gera dados, benchmark e paráfrases em data/
+python -m temporal_rag.cli eval      # agentes no benchmark (split dev)
+python -m temporal_rag.cli eval --blind
+python -m temporal_rag.cli eval-paraphrase
+python -m temporal_rag.cli ablate    # recuperação: recall@k, MRR, nDCG
+python -m temporal_rag.cli compare   # exemplo lado a lado no terminal
+python -m temporal_rag.cli serve     # API + interface em http://127.0.0.1:8000
+python -m pytest -q tests/           # 40 testes
 ```
 
-### 1. Gerar Dados Sintéticos e Benchmark
-Gera 250 clientes sintéticos com timelines bitemporais realistas (6.400+ eventos) e gera o dataset de benchmark com 240 perguntas:
+Atalhos em `Makefile` (`make seed`, `make eval`, `make eval-para`, `make ablate`, `make test`, `make run`) para quem tem `make`. `make clean` apaga `data/`. Para gerar os dados em outra pasta, defina `TEMPORAL_RAG_DATA_DIR`.
 
-```bash
-make seed
-# ou:
-python -m temporal_rag.cli seed --customers 250
-```
+## Documentação
 
-### 2. Rodar Avaliação do Benchmark (Métricas e Ablação)
-Executa o benchmark completo comparando o Baseline (Naive RAG) contra o Temporal RAG:
+| Documento | Conteúdo |
+| :--- | :--- |
+| [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md) | Modelo bitemporal, fluxo de dados, grafo do LangGraph, módulos e decisões de design |
+| [`docs/AVALIACAO.md`](docs/AVALIACAO.md) | Benchmark, métricas, resultados completos, ablação, paráfrases, histórico de correções e ameaças à validade |
+| [`docs/SEGURANCA.md`](docs/SEGURANCA.md) | Guarda de entrada, mascaramento de PII, API key, métricas e limites |
+| [`docs/APRENDIZADOS_E_LIMITACOES.md`](docs/APRENDIZADOS_E_LIMITACOES.md) | O que foi e o que não foi feito do plano de estudo, lições aprendidas e próximos passos |
 
-```bash
-make eval
-# ou:
-python -m temporal_rag.cli eval
-```
-
-### 3. Comparação Interativa no Terminal
-Visualize o erro clássico do Naive RAG e o acerto do Temporal RAG:
-
-```bash
-make compare
-# ou:
-python -m temporal_rag.cli compare
-```
-
-### 4. Iniciar a Dashboard Interativa (Web UI & API)
-Inicia o servidor FastAPI com interface visual moderna para navegação bitemporal e consultas:
-
-```bash
-make run
-# ou:
-python -m temporal_rag.cli serve
-```
-Acesse no seu navegador: **[http://localhost:8000](http://localhost:8000)**
-
-### 5. Executar os Testes Unitários
-
-```bash
-python -m pytest -v tests/
-```
-
----
-
-## 📁 Estrutura do Código
+## Estrutura do código
 
 ```
 temporal_RAG/
-├── data/
-│   ├── crm_temporal.db            # Banco SQLite local bitemporal
-│   ├── benchmark_dataset.json     # Perguntas com ground truth e event IDs
-│   └── evaluation_report.json    # Relatório de acurácia, latência e citações
-├── src/
-│   └── temporal_rag/
-│       ├── models/schema.py       # Modelos Pydantic (valid_time, recorded_at, EventType)
-│       ├── storage/db.py          # Camada de banco de dados (SQLite e Postgres)
-│       ├── generator/synthetic.py # Gerador determinístico de eventos e timelines
-│       ├── benchmark/             # Gerador de dataset com gabarito temporal
-│       ├── retrieval/
-│       │   ├── embeddings.py      # TF-IDF e vetorizador semântico
-│       │   ├── naive_retriever.py # Baseline sem filtros temporais
-│       │   └── temporal_retriever.py # Retriever com filtro bitemporal e recency decay
-│       ├── agent/
-│       │   ├── temporal_parser.py # Extração de datas e classificação de intenção
-│       │   └── agent.py           # Agente temporal com rastreabilidade e citações
-│       ├── eval/evaluator.py      # Harness de medição de acurácia, recall e latência
-│       ├── server/app.py          # API FastAPI e Dashboard Web
-│       └── cli.py                 # Interface CLI completa
-├── tests/                         # Suite de testes unitários automatizados
-├── docker-compose.yml             # Postgres 16 com extensão pgvector
-├── Makefile                       # Atalhos de execução (seed, eval, compare, run, test)
-└── pyproject.toml
+├── src/temporal_rag/
+│   ├── models/schema.py           # Modelos Pydantic (eventos bitemporais, perguntas, respostas)
+│   ├── storage/db.py              # Persistência (SQLite por padrão; PostgreSQL via DATABASE_URL, não testado)
+│   ├── generator/synthetic.py     # Gerador sintético determinístico
+│   ├── benchmark/
+│   │   ├── dataset_generator.py   # Perguntas com gabarito, multi-hop, adversariais, split dev/teste
+│   │   └── paraphrases.py         # 6 redações livres por pergunta
+│   ├── retrieval/
+│   │   ├── naive_retriever.py     # Baseline por similaridade
+│   │   ├── temporal_retriever.py  # Filtro bitemporal e decaimento
+│   │   └── strategies.py          # TF-IDF, BM25, LSA, híbrido RRF (usado na ablação)
+│   ├── agent/
+│   │   ├── langgraph_agent.py     # Grafo do agente temporal
+│   │   ├── intent.py              # Extrator de intenção (regras ou LLM plugável)
+│   │   ├── temporal_parser.py     # Datas, tickets, classificação por regras
+│   │   └── agent.py               # Baseline e alias do agente temporal
+│   ├── eval/                      # evaluator.py, metrics.py, ablation.py
+│   ├── security.py                # Guarda de entrada e mascaramento de PII
+│   ├── server/app.py              # API FastAPI e interface web
+│   └── cli.py
+├── tests/                         # 40 testes
+├── docs/                          # Documentação
+├── docker-compose.yml             # Postgres 16 + pgvector (imagem; a extensão não é usada pelo código)
+└── Makefile
 ```
 
----
+## Limitações principais
 
-## 🐳 Executando com Docker Compose (Postgres + pgvector)
+- Sem LLM: as respostas são montadas por modelos de texto a partir dos eventos recuperados.
+- Sem embeddings neurais nem reranker: o "denso" da ablação é LSA (TF-IDF + SVD).
+- O pgvector está disponível na imagem do Docker, mas **não é usado** pelo código.
+- Agregações são filtros em Python sobre os eventos, não consultas SQL.
+- Sem autorização por cliente nem row-level security.
 
-Para subir o banco PostgreSQL 16 com suporte vetorial nativo:
-
-```bash
-docker compose up -d
-```
-Defina a variável de ambiente:
-```bash
-set DATABASE_URL=postgresql://temporal_user:temporal_pass@localhost:5432/temporal_crm
-```
-E execute `make seed` normalmente para popular o Postgres.
+A lista completa e o que fica para depois estão em [`docs/APRENDIZADOS_E_LIMITACOES.md`](docs/APRENDIZADOS_E_LIMITACOES.md).
